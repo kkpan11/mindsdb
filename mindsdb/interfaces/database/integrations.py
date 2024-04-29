@@ -18,7 +18,8 @@ from sqlalchemy import func
 
 from mindsdb.interfaces.storage import db
 from mindsdb.utilities.config import Config
-from mindsdb.interfaces.storage.fs import FsStore, FileStorage, FileStorageFactory, RESOURCE_GROUP
+from mindsdb.utilities.exception import EntityNotExistsError
+from mindsdb.interfaces.storage.fs import FsStore, FileStorage, RESOURCE_GROUP
 from mindsdb.interfaces.storage.model_fs import HandlerStorage
 from mindsdb.interfaces.file.file_controller import FileController
 from mindsdb.integrations.libs.base import DatabaseHandler
@@ -28,11 +29,12 @@ from mindsdb.integrations.libs.const import HANDLER_CONNECTION_ARG_TYPE as ARG_T
 from mindsdb.integrations.handlers_client.db_client_factory import DBClient
 from mindsdb.interfaces.model.functions import get_model_records
 from mindsdb.utilities.context import context as ctx
-from mindsdb.utilities.log import get_log
+from mindsdb.utilities import log
 from mindsdb.integrations.libs.ml_exec_base import BaseMLEngineExec
+from mindsdb.integrations.libs.base import BaseHandler
 import mindsdb.utilities.profiler as profiler
 
-logger = get_log()
+logger = log.getLogger(__name__)
 
 
 class HandlersCache:
@@ -202,13 +204,15 @@ class IntegrationController:
             store.add(files_dir, '')
             store.push()
 
+        if handler_meta.get('type') == HANDLER_TYPE.ML:
+            ml_handler = self.get_ml_handler(name)
+            ml_handler.create_engine(connection_args, integration_id)
+
         return integration_id
 
     def modify(self, name, data):
         self.handlers_cache.delete(name)
-        integration_record = db.session.query(db.Integration).filter_by(
-            company_id=ctx.company_id, name=name
-        ).first()
+        integration_record = self._get_integration_record(name)
         old_data = deepcopy(integration_record.data)
         for k in old_data:
             if k not in data:
@@ -230,7 +234,7 @@ class IntegrationController:
             if getattr(handler, 'permanent', False) is True:
                 raise Exception('Unable to drop: is permanent integration')
 
-        integration_record = db.session.query(db.Integration).filter_by(company_id=ctx.company_id, name=name).first()
+        integration_record = self._get_integration_record(name)
 
         # if this is ml engine
         engine_models = get_model_records(ml_handler_name=name, deleted_at=None)
@@ -265,8 +269,6 @@ class IntegrationController:
         ):
             return None
         data = deepcopy(integration_record.data)
-        if data.get('password', None) is None:
-            data['password'] = ''
 
         bundle_path = data.get('secure_connect_bundle')
         mysql_ssl_ca = data.get('ssl_ca')
@@ -320,25 +322,56 @@ class IntegrationController:
             'type': integration_type,
             'class_type': class_type,
             'engine': integration_record.engine,
+            'permanent': getattr(integration_module, 'permanent', False),
             'date_last_update': deepcopy(integration_record.updated_at),
             'connection_data': data
         }
 
     def get_by_id(self, integration_id, sensitive_info=True):
-        integration_record = db.session.query(db.Integration).filter_by(company_id=ctx.company_id, id=integration_id).first()
+        integration_record = (
+            db.session.query(db.Integration)
+            .filter_by(company_id=ctx.company_id, id=integration_id)
+            .first()
+        )
         return self._get_integration_record_data(integration_record, sensitive_info)
 
     def get(self, name, sensitive_info=True, case_sensitive=False):
+        try:
+            integration_record = self._get_integration_record(name, case_sensitive)
+        except EntityNotExistsError:
+            return None
+        return self._get_integration_record_data(integration_record, sensitive_info)
+
+    @staticmethod
+    def _get_integration_record(name: str, case_sensitive: bool = False) -> db.Integration:
+        """Get integration record by name
+
+        Args:
+            name (str): name of the integration
+            case_sensitive (bool): should search be case sensitive or not
+
+        Retruns:
+            db.Integration
+        """
         if case_sensitive:
-            integration_record = db.session.query(db.Integration).filter_by(
-                company_id=ctx.company_id, name=name
-            ).first()
+            integration_records = db.session.query(db.Integration).filter_by(
+                company_id=ctx.company_id,
+                name=name
+            ).all()
+            if len(integration_records) > 1:
+                raise Exception(f"There is {len(integration_records)} integrations with name '{name}'")
+            if len(integration_records) == 0:
+                raise EntityNotExistsError(f"There is no integration with name '{name}'")
+            integration_record = integration_records[0]
         else:
             integration_record = db.session.query(db.Integration).filter(
                 (db.Integration.company_id == ctx.company_id)
                 & (func.lower(db.Integration.name) == func.lower(name))
             ).first()
-        return self._get_integration_record_data(integration_record, sensitive_info)
+            if integration_record is None:
+                raise EntityNotExistsError(f"There is no integration with name '{name}'")
+
+        return integration_record
 
     def get_all(self, sensitive_info=True):
         integration_records = db.session.query(db.Integration).filter_by(company_id=ctx.company_id).all()
@@ -400,7 +433,7 @@ class IntegrationController:
             root_dir='tmp',
             sync=False
         )
-        handler_storage = HandlerStorage(integration_id, root_dir='tmp')
+        handler_storage = HandlerStorage(integration_id, root_dir='tmp', is_temporal=True)
         handler_ars = self._make_handler_args(
             name='tmp_handler',
             handler_type=handler_type,
@@ -416,9 +449,10 @@ class IntegrationController:
     def copy_integration_storage(self, integration_id_from, integration_id_to):
         storage_from = HandlerStorage(integration_id_from)
         root_path = ''
-        folder_from = storage_from.folder_get(root_path, not_empty=True)
-        if folder_from is None:
-            return
+
+        if storage_from.is_empty():
+            return None
+        folder_from = storage_from.folder_get(root_path)
 
         storage_to = HandlerStorage(integration_id_to)
         folder_to = storage_to.folder_get(root_path)
@@ -426,32 +460,68 @@ class IntegrationController:
         shutil.copytree(folder_from, folder_to, dirs_exist_ok=True)
         storage_to.folder_sync(root_path)
 
+    def get_ml_handler(self, name: str, case_sensitive: bool = False) -> BaseMLEngine:
+        """Get ML handler by name
+        Args:
+            name (str): name of the handler
+            case_sensitive (bool): should case be taken into account when searching by name
+
+        Returns:
+            BaseMLEngine
+        """
+        integration_record = self._get_integration_record(name, case_sensitive)
+        integration_engine = integration_record.engine
+
+        if integration_engine not in self.handlers_import_status:
+            raise Exception(f"Handler '{name}' does not exists")
+
+        integration_meta = self.handlers_import_status[integration_engine]
+        if integration_meta.get('type') != HANDLER_TYPE.ML:
+            raise Exception(f"Handler '{name}' must be ML type")
+
+        logger.info(
+            f"{self.__class__.__name__}.get_handler: create a ML client "
+            + f"{integration_record.name}/{integration_record.id}"
+        )
+        handler = BaseMLEngineExec(
+            name=integration_record.name,
+            integration_id=integration_record.id,
+            handler_module=self.handler_modules[integration_engine]
+        )
+
+        return handler
+
     @profiler.profile()
-    def get_handler(self, name, case_sensitive=False):
+    def get_data_handler(self, name: str, case_sensitive: bool = False) -> BaseHandler:
+        """Get DATA handler (DB or API) by name
+        Args:
+            name (str): name of the handler
+            case_sensitive (bool): should case be taken into account when searching by name
+
+        Returns:
+            BaseHandler: data handler
+        """
         handler = self.handlers_cache.get(name)
         if handler is not None:
             return handler
 
-        if case_sensitive:
-            integration_record = db.session.query(db.Integration).filter_by(company_id=ctx.company_id, name=name).first()
-        else:
-            integration_record = db.session.query(db.Integration).filter(
-                (db.Integration.company_id == ctx.company_id)
-                & (func.lower(db.Integration.name) == func.lower(name))
-            ).first()
+        integration_record = self._get_integration_record(name, case_sensitive)
+        integration_engine = integration_record.engine
+
+        integration_meta = self.handlers_import_status[integration_engine]
+        if integration_meta.get('type') != HANDLER_TYPE.DATA:
+            raise Exception(f"Handler '{name}' must be DATA type")
 
         integration_data = self._get_integration_record_data(integration_record, True)
         if integration_data is None:
             raise Exception(f"Can't find integration_record for handler '{name}'")
         connection_data = integration_data.get('connection_data', {})
-        integration_engine = integration_data['engine']
-        integration_name = integration_data['name']
-        logger.debug("%s.get_handler: connection_data=%s, engine=%s", self.__class__.__name__, connection_data, integration_engine)
+        logger.debug(
+            "%s.get_handler: connection_data=%s, engine=%s",
+            self.__class__.__name__,
+            connection_data, integration_engine
+        )
 
-        if integration_engine not in self.handler_modules:
-            raise Exception(f"Can't find handler for '{integration_name}' ({integration_engine})")
-
-        integration_meta = self.handlers_import_status[integration_engine]
         if integration_meta["import"]["success"] is False:
             msg = dedent(f'''\
                 Handler '{integration_engine}' cannot be used. Reason is:
@@ -496,28 +566,14 @@ class IntegrationController:
             handler_storage=handler_storage
         )
 
-        handler_type = self.handler_modules[integration_engine].type
-        if handler_type == 'ml':
-            handler_ars['storage_factory'] = FileStorageFactory(
-                resource_group=RESOURCE_GROUP.PREDICTOR,
-                sync=True
-            )
-
+        logger.info(
+            "%s.get_handler: create a client to db service of %s type, args - %s",
+            self.__class__.__name__,
+            integration_engine, handler_ars
+        )
         HandlerClass = self.handler_modules[integration_engine].Handler
-
-        if isinstance(HandlerClass, type) and issubclass(HandlerClass, BaseMLEngine):
-            handler_ars['handler_class'] = HandlerClass
-            handler_ars['execution_method'] = getattr(self.handler_modules[integration_engine], 'execution_method', None)
-            handler_ars['integration_engine'] = integration_engine
-            logger.info("%s.get_handler: create a ML client, params - %s", self.__class__.__name__, handler_ars)
-            handler = BaseMLEngineExec(**handler_ars)
-            # handler = MLClient(**handler_ars)
-        else:
-
-            logger.info("%s.get_handler: create a client to db service of %s type, args - %s", self.__class__.__name__, integration_engine, handler_ars)
-            handler = HandlerClass(**handler_ars)
-            # handler = DBClient(integration_engine, HandlerClass, **handler_ars)
-            self.handlers_cache.set(handler)
+        handler = HandlerClass(**handler_ars)
+        self.handlers_cache.set(handler)
 
         return handler
 
@@ -593,17 +649,26 @@ class IntegrationController:
 
         # region icon
         if hasattr(module, 'icon_path'):
-            icon_path = handler_dir.joinpath(module.icon_path)
-            handler_meta['icon'] = {
-                'name': icon_path.name,
-                'type': icon_path.name[icon_path.name.rfind('.') + 1:].lower()
-            }
-            if handler_meta['icon']['type'] == 'svg':
-                with open(str(icon_path), 'rt') as f:
-                    handler_meta['icon']['data'] = f.read()
-            else:
-                with open(str(icon_path), 'rb') as f:
-                    handler_meta['icon']['data'] = base64.b64encode(f.read()).decode('utf-8')
+            try:
+                icon_path = handler_dir.joinpath(module.icon_path)
+                icon_type = icon_path.name[icon_path.name.rfind('.') + 1:].lower()
+
+                if icon_type == 'svg':
+                    with open(str(icon_path), 'rt') as f:
+                        handler_meta['icon'] = {
+                            'data': f.read()
+                        }
+                else:
+                    with open(str(icon_path), 'rb') as f:
+                        handler_meta['icon'] = {
+                            'data': base64.b64encode(f.read()).decode('utf-8')
+                        }
+
+                handler_meta['icon']['name'] = icon_path.name
+                handler_meta['icon']['type'] = icon_type
+            except Exception as e:
+                logger.error(f'Error reading icon for {handler_folder_name}, {e}!')
+
         # endregion
         if hasattr(module, 'permanent'):
             handler_meta['permanent'] = module.permanent
@@ -629,27 +694,30 @@ class IntegrationController:
         for handler_dir in handlers_path.iterdir():
             if handler_dir.is_dir() is False or handler_dir.name.startswith('__'):
                 continue
-            handler_folder_name = str(handler_dir.name)
+            self.import_handler('mindsdb.integrations.handlers.', handler_dir)
 
-            try:
-                handler_module = importlib.import_module(f'mindsdb.integrations.handlers.{handler_folder_name}')
-                handler_meta = self._get_handler_meta(handler_module)
-            except Exception as e:
-                handler_name = handler_folder_name
-                if handler_name.endswith('_handler'):
-                    handler_name = handler_name[:-8]
-                dependencies = self._read_dependencies(handler_dir)
-                handler_meta = {
-                    'import': {
-                        'success': False,
-                        'error_message': str(e),
-                        'folder': handler_folder_name,
-                        'dependencies': dependencies
-                    },
-                    'name': handler_name
-                }
+    def import_handler(self, base_import: str, handler_dir: Path):
+        handler_folder_name = str(handler_dir.name)
 
-            self.handlers_import_status[handler_meta['name']] = handler_meta
+        try:
+            handler_module = importlib.import_module(f'{base_import}{handler_folder_name}')
+            handler_meta = self._get_handler_meta(handler_module)
+        except Exception as e:
+            handler_name = handler_folder_name
+            if handler_name.endswith('_handler'):
+                handler_name = handler_name[:-8]
+            dependencies = self._read_dependencies(handler_dir)
+            handler_meta = {
+                'import': {
+                    'success': False,
+                    'error_message': str(e),
+                    'folder': handler_folder_name,
+                    'dependencies': dependencies
+                },
+                'name': handler_name
+            }
+
+        self.handlers_import_status[handler_meta['name']] = handler_meta
 
     def get_handlers_import_status(self):
         return self.handlers_import_status

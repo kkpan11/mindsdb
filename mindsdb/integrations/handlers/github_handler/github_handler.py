@@ -4,19 +4,25 @@ from collections import OrderedDict
 from mindsdb.integrations.handlers.github_handler.github_tables import (
     GithubIssuesTable,
     GithubPullRequestsTable,
+    GithubCommitsTable,
+    GithubReleasesTable,
+    GithubBranchesTable,
+    GithubContributorsTable,
+    GithubMilestonesTable,
+    GithubProjectsTable, GithubFilesTable
 )
+
 from mindsdb.integrations.libs.api_handler import APIHandler
 from mindsdb.integrations.libs.response import (
     HandlerStatusResponse as StatusResponse,
 )
 from mindsdb.integrations.libs.const import HANDLER_CONNECTION_ARG_TYPE as ARG_TYPE
 
-from mindsdb.utilities.log import get_log
+from mindsdb.utilities import log
 from mindsdb_sql import parse_sql
 
 
-logger = get_log("integrations.github_handler")
-
+logger = log.getLogger(__name__)
 
 class GithubHandler(APIHandler):
     """The GitHub handler implementation"""
@@ -39,10 +45,15 @@ class GithubHandler(APIHandler):
         self.connection = None
         self.is_connected = False
 
-        github_issues_data = GithubIssuesTable(self)
-        github_pull_requests_data = GithubPullRequestsTable(self)
-        self._register_table("issues", github_issues_data)
-        self._register_table("pull_requests", github_pull_requests_data)
+        self._register_table("issues", GithubIssuesTable(self))
+        self._register_table("pull_requests", GithubPullRequestsTable(self))
+        self._register_table("commits", GithubCommitsTable(self))
+        self._register_table("releases", GithubReleasesTable(self))
+        self._register_table("branches", GithubBranchesTable(self))
+        self._register_table("contributors", GithubContributorsTable(self))
+        self._register_table("milestones", GithubMilestonesTable(self))
+        self._register_table("projects", GithubProjectsTable(self))
+        self._register_table("files", GithubFilesTable(self))
 
     def connect(self) -> StatusResponse:
         """Set up the connection required by the handler.
@@ -52,6 +63,9 @@ class GithubHandler(APIHandler):
         StatusResponse
             connection object
         """
+
+        if self.is_connected is True:
+            return self.connection
 
         connection_kwargs = {}
 

@@ -3,9 +3,19 @@ title: Plaid
 sidebarTitle: Plaid
 ---
 
-This is the implementation of the Plaid app handler for MindsDB. It helps you automate the financial data processing.
+In this section, we present how to connect Plaid to MindsDB.
 
-[Plaid](https://plaid.com/) helps all companies build fintech solutions by making it easy, safe and reliable for people to connect their financial data to apps and services.
+[Plaid](https://plaid.com/) is a financial technology company that offers a platform and a set of APIs that facilitate the integration of financial services and data into applications and websites. Its services primarily focus on enabling developers to connect with and access financial accounts and data from various financial institutions.
+
+Data from Plaid can be utilized within MindsDB to train AI models and make financial forecasts.
+
+## Prerequisites
+
+Before proceeding, ensure the following prerequisites are met:
+
+1. Install MindsDB locally via [Docker](/setup/self-hosted/docker) or [Docker Desktop](/setup/self-hosted/docker-desktop).
+2. To connect Plaid to MindsDB, install the required dependencies following [this instruction](/setup/self-hosted/docker#install-dependencies).
+3. Install or ensure access to Plaid.
 
 ## Connection
 
@@ -19,10 +29,6 @@ The required arguments to establish a connection are as follows:
 <Tip>
 You can get the `client_id`, `secret`, and `access_token` values [here](https://dashboard.plaid.com/team/keys) once you sign in to your Plaid account.
 And [here](https://plaid.com/docs/api/tokens/#itempublic_tokenexchange) is how you generate the `access_token` value.
-</Tip>
-
-<Tip>
-If you installed MindsDB locally via pip, you need to install all handler dependencies manually. To do so, go to the handler's folder (mindsdb/integrations/handlers/plaid_handler) and run this command: `pip install -r requirements.txt`.
 </Tip>
 
 In order to make use of this handler and connect the Plaid app to MindsDB, the following syntax can be used:

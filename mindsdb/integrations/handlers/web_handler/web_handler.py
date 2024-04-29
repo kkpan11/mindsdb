@@ -1,5 +1,3 @@
-import logging
-
 import pandas as pd
 
 from mindsdb_sql.parser import ast
@@ -12,6 +10,8 @@ from mindsdb.integrations.libs.response import (
     HandlerResponse as Response,
     RESPONSE_TYPE
 )
+from mindsdb.utilities.security import is_private_url
+from mindsdb.utilities.config import Config
 
 from .urlcrawl_helpers import get_df_from_query_str, get_all_websites
 
@@ -39,7 +39,9 @@ class CrawlerTable(APITable):
                         urls = url
                 else:
                     raise NotImplementedError(
-                        f'url can be url = "someurl", you can also crawl multiple sites, as follows: url IN ("url1", "url2", ..)')
+                        f'url can be url = "someurl", you can also crawl multiple sites, as follows:'
+                        f' url IN ("url1", "url2", ..)'
+                    )
 
             else:
                 pass
@@ -48,20 +50,25 @@ class CrawlerTable(APITable):
             raise NotImplementedError(
                 f'You must specify what url you want to crawl, for example: SELECT * FROM crawl WHERE url IN ("someurl", ..)')
 
-        limit = None
+        if query.limit is None:
+            raise NotImplementedError(f'You must specify a LIMIT which defines the number of pages to crawl')
+        limit = query.limit.value
 
-        if query.limit is not None:
-            limit = query.limit.value
-            if limit < 0:
-                limit = None
-                raise NotImplementedError(
-                f'You must specify a LIMIT which defines how deep to crawl, a LIMIT 10000 means that will crawl ALL websites and subwebsites in that domain (this can take a while)')
+        if limit < 0:
+            limit = 0
 
-        if limit is None or limit == 0:
-            limit = 1
-            
+        config = Config()
+        is_cloud = config.get("cloud", False)
+        if is_cloud:
+            urls = [
+                url
+                for url in urls
+                if not is_private_url(url)
+            ]
+
         result = get_all_websites(urls, limit, html=False)
-
+        if len(result) > limit:
+            result = result[:limit]
         # filter targets
         result = project_dataframe(result, query.targets, self.get_columns())
         return result
@@ -104,7 +111,3 @@ class WebHandler(APIHandler):
             RESPONSE_TYPE.TABLE,
             data_frame=df
         )
-
-
-if __name__ == "__main__":
-    logging.basicConfig(level=logging.INFO)

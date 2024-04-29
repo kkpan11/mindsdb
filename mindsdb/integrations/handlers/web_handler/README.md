@@ -1,15 +1,15 @@
-# Build your own Web crawler
+# Build your Web crawler
 
-This integration allows you to query the results of a crawler in SQL, 
+This integration allows you to query the results of a crawler in SQL:
 
-- This can be particularly useful for building A/Q systems from data on website
+- This can be particularly useful for building A/Q systems from data on a website.
 
-Note that this crawler has the hability to crawl every single sub site from the original
+Note that this crawler can crawl every single sub-site from the original.
 
 Let's see in action
 
-```
-# Should be able to create a web crawler database
+```sql
+-- Should be able to create a web crawler database
 CREATE DATABASE my_web 
 With 
     ENGINE = 'web';
@@ -18,11 +18,11 @@ With
 This creates a database called my_web. This database ships with a table called crawler that we can use to crawl data given some url/urls.
 
 
-## Searching for web conteant in SQL
+## Searching for web content in SQL
 
-Let's get the content of a website docs.mindsdb.com 
+Let's get the content of a docs.mindsdb.com website:
 
-```
+```sql
 SELECT 
    * 
 FROM my_web.crawler 
@@ -32,40 +32,23 @@ LIMIT 1;
 ```
 
 
-This should return the conteants of docs.mindsdb.com
+This should return the contents of docs.mindsdb.com.
 
 
-Now lets assume that we want to search for the contents on more than one website
+Now, let's assume we want to search for the content on multiple websites.
 
-
-```
+```sql
 SELECT 
    * 
 FROM my_web.crawler 
 WHERE 
-   url IN ('docs.mindsdb.com', 'docs.python.com') 
-LIMIT 1;
+   url IN ('docs.mindsdb.com', 'docs.python.org') 
+LIMIT 30;
 ```
 
-That should obtain two rows, LIMIT 1 limits how deep you go on each
+This command will crawl two sites and stop when the results count hits 30. The total count of rows in the result will be 30.
 
-
-now lets get 10 pages deep on both:
-
-
-```
-SELECT 
-   * 
-FROM my_web.crawler 
-WHERE 
-   url IN ('docs.mindsdb.com', 'docs.python.com') 
-LIMIT 10;
-```
-
-You will get 20 results, as the crawler went 10 levels deeper into each url
-
-
-NOTE: If you dont pass a limit, it will crawl until there are no more links to crawl, you should try it, it may take a while but it is pretty useful if say you wan to train a 
-model to answer questions for you given the info on this website
+NOTE: limit is mandatory. If you want to crawl all pages on the site, you can pass a big number in the limit (for example, 10000), more than the expected count of pages on the site. 
+However, a big limit also increases the time waiting for a response.
 
 
